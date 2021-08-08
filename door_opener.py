@@ -5,13 +5,25 @@ import subprocess
 from subprocess import Popen
 import time
 from requests.auth import HTTPDigestAuth
+import flask_httpauth
 import requests
+import sys
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = "Get#VcP25gPN"
+digest_auth = flask_httpauth.HTTPDigestAuth()
+
 global settings
 global cached_images
 
-def abort_if_invalid_camera_number(camera_no):
+@digest_auth.get_password
+def get_password(username: str):
+    global settings
+    if username in settings["users"]:
+        return settings["users"].get(username)
+    return None
+
+def abort_if_invalid_camera_number(camera_no: int):
     if camera_no >= len(settings["intercom"]):
         abort(404, message="There is no intercom {}".format(camera_no))
 
@@ -34,11 +46,6 @@ def get_picture(intercom_no: int, is_big: bool):
     cached_images[intercom_no] = {"timestamp": time.time(), "picture": stdout}
     return stdout
 
-@app.route('/intercoms/<int:camera_no>/description')
-def description(camera_no):
-    abort_if_invalid_camera_number(camera_no)
-    return settings["intercom"][camera_no]["description"], 200, {'Content-Type': 'text/plain; charset=utf-8'}
-
 def picture(camera_no: int, is_big: bool) -> str:
     abort_if_invalid_camera_number(camera_no)
     if (camera_no in cached_images.keys()) and ((time.time() - cached_images[camera_no]["timestamp"]) < 5):
@@ -47,30 +54,69 @@ def picture(camera_no: int, is_big: bool) -> str:
         picture = get_picture(camera_no, is_big)
     return picture, 200, {'Content-Type': 'image/jpeg'}
 
-@app.route('/intercoms/<int:camera_no>/big_picture')
-def big_picture(camera_no):
+#URLs
+def description(camera_no: int):
+    abort_if_invalid_camera_number(camera_no)
+    return settings["intercom"][camera_no]["description"], 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
+def big_picture(camera_no: int):
     return picture(camera_no, True)
 
-@app.route('/intercoms/<int:camera_no>/small_picture')
-def small_picture(camera_no):
+def small_picture(camera_no: int):
     return picture(camera_no, False)
 
-@app.route('/intercoms/<int:intercom_no>/open_door')
+def list_intercoms():
+	def desc(a: dict) -> dict:
+		out = {"description": a["description"]}
+		if "section" in a.keys():
+			out["section"] = a["section"]
+		return out
+	return json.dumps(list(map(desc, settings["intercom"]))), 200, {'Content-Type': 'application/json; charset=utf-8'}
+
 def open_door(intercom_no):
     url = "http://%s/ISAPI/AccessControl/RemoteControl/door/1"%(settings["intercom"][intercom_no]["rtsp_host"])
     r = requests.put(url, data="<RemoteControlDoor><cmd>open</cmd></RemoteControlDoor>",
                       auth=HTTPDigestAuth(settings["intercom"][intercom_no]["rtsp_login"],
                                           settings["intercom"][intercom_no]["rtsp_password"]),
                       headers={'Content-Type': 'application/xml'})
-    print(r)
     return "OK", 200, {'Content-Type': 'text/plain; charset=utf-8'}
+
+@app.route('/auth_digest/intercoms/<int:camera_no>/description')
+@digest_auth.login_required
+def digest_description(camera_no: int):
+    return description(camera_no)
+
+@app.route('/auth_digest/intercoms/<int:camera_no>/big_picture')
+@digest_auth.login_required
+def digest_big_picture(camera_no: int):
+    return big_picture(camera_no)
+
+@app.route('/auth_digest/intercoms/<int:camera_no>/small_picture')
+@digest_auth.login_required
+def digest_small_picture(camera_no: int):
+    return small_picture(camera_no)
+
+@app.route('/auth_digest/intercoms/<int:intercom_no>/open_door')
+@digest_auth.login_required
+def digest_open_door(intercom_no: int):
+    return open_door(intercom_no)
+
+@app.route('/auth_digest/intercoms')
+@digest_auth.login_required
+def digest_list_intercoms():
+    return list_intercoms()
 
 if __name__ == '__main__':
     # Load configuration
     global settings
     global cached_images
     cached_images = {}
-    with open("configuration.json", "rb") as f:
+    if len(sys.argv) != 2:
+        conf = "configuration.json"
+    else:
+        conf = sys.argv[1]
+    with open(conf, "rb") as f:
         conf = f.read()
         settings = json.loads(conf.decode("utf-8", "ignore"))
-    app.run(debug=True)
+        app.config["SECRET_KEY"] = settings["secret_key"]
+    app.run(host="0.0.0.0", port=8050, debug=settings["debug"])
